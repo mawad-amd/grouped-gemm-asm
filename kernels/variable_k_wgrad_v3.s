@@ -981,8 +981,8 @@ _grouped_variable_k_gemm_kernel:
 	ds_read_b64_tr_b8 v[140:141], v216 offset:24704
 	ds_read_b64_tr_b8 v[146:147], v216 offset:16512
 	ds_read_b64_tr_b8 v[154:155], v217 offset:16384
-	ds_read_b64_tr_b8 v[142:143], v217 offset:24704
 	ds_read_b64_tr_b8 v[148:149], v217 offset:16512
+	ds_read_b64_tr_b8 v[142:143], v217 offset:24704
 	v_add_u32_e32 v218, 0, v177
 	s_waitcnt lgkmcnt(7)
 	v_mfma_f32_16x16x32_fp8_bf8 v[120:123], v[152:153], v[150:151], v[120:123]
@@ -998,7 +998,7 @@ _grouped_variable_k_gemm_kernel:
 	v_add_u32_e32 v204, 64, v204
 	v_add_u32_e32 v203, 64, v203
 	s_cmp_lg_u32 s10, 0
-	s_waitcnt lgkmcnt(0)
+	s_waitcnt lgkmcnt(1)
 	v_mfma_f32_16x16x32_fp8_bf8 v[92:95], v[148:149], v[150:151], v[92:95]
 	ds_read_b64_tr_b8 v[156:157], v218
 	ds_read_b64_tr_b8 v[150:151], v218 offset:8320
@@ -1034,30 +1034,30 @@ _grouped_variable_k_gemm_kernel:
 	v_mfma_f32_16x16x32_fp8_bf8 v[20:23], v[154:155], v[214:215], v[20:23]
 	ds_read_b64_tr_b8 v[154:155], v217 offset:24576
 	v_mfma_f32_16x16x32_fp8_bf8 v[68:71], v[146:147], v[212:213], v[68:71]
-	ds_read_b64_tr_b8 v[160:161], v205 offset:8192
+	ds_read_b64_tr_b8 v[162:163], v205 offset:8192
 	v_mfma_f32_16x16x32_fp8_bf8 v[52:55], v[146:147], v[206:207], v[52:55]
 	v_mfma_f32_16x16x32_fp8_bf8 v[36:39], v[146:147], v[208:209], v[36:39]
 	v_mfma_f32_16x16x32_fp8_bf8 v[16:19], v[146:147], v[210:211], v[16:19]
 	v_mfma_f32_16x16x32_fp8_bf8 v[12:15], v[146:147], v[214:215], v[12:15]
 	s_waitcnt lgkmcnt(0)
-	v_mfma_f32_16x16x32_fp8_bf8 v[120:123], v[152:153], v[160:161], v[120:123]
+	v_mfma_f32_16x16x32_fp8_bf8 v[120:123], v[152:153], v[162:163], v[120:123]
 	ds_read_b64_tr_b8 v[146:147], v218 offset:8192
-	v_mfma_f32_16x16x32_fp8_bf8 v[108:111], v[154:155], v[160:161], v[108:111]
-	v_mfma_f32_16x16x32_fp8_bf8 v[100:103], v[140:141], v[160:161], v[100:103]
-	v_mfma_f32_16x16x32_fp8_bf8 v[92:95], v[142:143], v[160:161], v[92:95]
+	v_mfma_f32_16x16x32_fp8_bf8 v[108:111], v[154:155], v[162:163], v[108:111]
+	v_mfma_f32_16x16x32_fp8_bf8 v[100:103], v[140:141], v[162:163], v[100:103]
+	v_mfma_f32_16x16x32_fp8_bf8 v[92:95], v[142:143], v[162:163], v[92:95]
 	s_waitcnt lgkmcnt(0)
 	v_mfma_f32_16x16x32_fp8_bf8 v[84:87], v[152:153], v[146:147], v[84:87]
-	ds_read_b64_tr_b8 v[160:161], v219 offset:8192
+	ds_read_b64_tr_b8 v[162:163], v219 offset:8192
 	v_mfma_f32_16x16x32_fp8_bf8 v[124:127], v[154:155], v[146:147], v[124:127]
 	v_mfma_f32_16x16x32_fp8_bf8 v[116:119], v[140:141], v[146:147], v[116:119]
 	v_mfma_f32_16x16x32_fp8_bf8 v[112:115], v[142:143], v[146:147], v[112:115]
 	v_mfma_f32_16x16x32_fp8_bf8 v[48:51], v[148:149], v[206:207], v[48:51]
 	s_waitcnt lgkmcnt(0)
-	v_mfma_f32_16x16x32_fp8_bf8 v[104:107], v[152:153], v[160:161], v[104:107]
+	v_mfma_f32_16x16x32_fp8_bf8 v[104:107], v[152:153], v[162:163], v[104:107]
 	ds_read_b64_tr_b8 v[146:147], v220 offset:8192
-	v_mfma_f32_16x16x32_fp8_bf8 v[96:99], v[154:155], v[160:161], v[96:99]
-	v_mfma_f32_16x16x32_fp8_bf8 v[88:91], v[140:141], v[160:161], v[88:91]
-	v_mfma_f32_16x16x32_fp8_bf8 v[80:83], v[142:143], v[160:161], v[80:83]
+	v_mfma_f32_16x16x32_fp8_bf8 v[96:99], v[154:155], v[162:163], v[96:99]
+	v_mfma_f32_16x16x32_fp8_bf8 v[88:91], v[140:141], v[162:163], v[88:91]
+	v_mfma_f32_16x16x32_fp8_bf8 v[80:83], v[142:143], v[162:163], v[80:83]
 	v_mfma_f32_16x16x32_fp8_bf8 v[64:67], v[148:149], v[212:213], v[64:67]
 	v_mfma_f32_16x16x32_fp8_bf8 v[32:35], v[148:149], v[208:209], v[32:35]
 	v_mfma_f32_16x16x32_fp8_bf8 v[60:63], v[152:153], v[144:145], v[60:63]
