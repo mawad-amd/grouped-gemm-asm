@@ -4,10 +4,26 @@ ASM optimization harness for FP8 tensorwise grouped GEMM kernels (GPT-OSS 20B Mo
 
 Plug in a `.co` (or `.s` to auto-assemble), get correctness vs Triton reference + benchmark.
 
+## Setup
+
+Docker container: `rocm/primus:v26.2` on MI355X (gfx950). Launch with:
+
+```bash
+docker run --rm --network=host --device=/dev/kfd --device=/dev/dri \
+  --group-add video --ipc=host --cap-add=SYS_PTRACE \
+  --security-opt seccomp=unconfined \
+  -v $(pwd):/workspace/grouped-gemm-asm \
+  --entrypoint /bin/bash rocm/primus:v26.2 -c "
+cd /workspace/grouped-gemm-asm
+export HIP_VISIBLE_DEVICES=0
+python3 bench.py --triton-only --site all
+"
+```
+
 ## Usage
 
 ```bash
-# Inside rocm/primus:v26.2 Docker on MI355X
+# Inside the container
 
 # Test reference .co against Triton (should match perfectly)
 python3 bench.py --kernel kernels/persistent_gemm_ref.co --site all_fwd
@@ -15,11 +31,11 @@ python3 bench.py --kernel kernels/persistent_gemm_ref.co --site all_fwd
 # Benchmark Triton baseline only
 python3 bench.py --triton-only --site all
 
-# Test a new hand-written kernel
+# Test a new hand-written kernel (.s auto-assembles via llvm-mc)
 python3 bench.py --kernel kernels/my_fast_gemm.s --site gate_up_fwd
 
-# Benchmark custom vs Triton
-python3 bench.py --kernel kernels/my_fast_gemm.co --site gate_up_fwd --benchmark
+# Benchmark custom vs Triton (--ref-co patches into ref .co's ELF for correct KD)
+python3 bench.py --kernel kernels/my_fast_gemm.s --ref-co kernels/variable_k_gemm_ref.co --site gate_up_wgrad --benchmark
 ```
 
 ## Call Sites
@@ -55,6 +71,13 @@ Ref ASM = same .co launched via HIP ctypes (~5% overhead vs Triton's compiled C 
 - `persistent_gemm_ref.co` — fwd sites (e4m3 x e4m3), 64x v_mfma_f32_16x16x128_f8f6f4, 248 VGPRs
 - `persistent_gemm_dgrad_ref.co` — dgrad sites (e5m2 x e4m3), same structure, different FP8 encoding
 - `variable_k_gemm_ref.co` — wgrad sites, 128x v_mfma_f32_16x16x32_fp8_bf8, 221 VGPRs
+
+## Tools
+
+- `tools/disasm_to_asm.py` — convert `llvm-objdump -d` output to assembleable `.s` with labels and AMDGPU metadata
+- `tools/patch_co.py` — splice new `.text` into a reference `.co` preserving the kernel descriptor
+
+Workflow: disassemble ref `.co` → edit `.s` → reassemble via `--ref-co` patching → test.
 
 ## Arg Layout
 
