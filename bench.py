@@ -309,19 +309,18 @@ def _pack_args(*args):
     return arr, storage
 
 
-def launch_persistent_kernel(func, a, b, out, a_scale, b_scale,
-                              group_offs, G, N, K,
-                              num_sms, shared_mem=65536):
-    """Launch persistent grouped GEMM .co with Triton's arg layout (Primus v26.2)."""
+def prepare_persistent_args(func, a, b, out, a_scale, b_scale,
+                             group_offs, G, N, K,
+                             num_sms, shared_mem=65536):
+    """Pre-pack args for persistent kernel. Returns a launcher closure."""
     hip = _load_hip()
 
     stride_am = a.stride(0)
     stride_bg = b.stride(0)
-    stride_bn = b.stride(1)  # N-stride (for trans_b=True, b is [E,N,K], stride(1)=K)
+    stride_bn = b.stride(1)
     stride_cm = out.stride(0)
     stride_cn = out.stride(1)
 
-    # Triton appends global_scratch (=0) and profile_scratch (=0) after user args
     args = [
         _ptr(a), _ptr(b), _ptr(out),
         _ptr(a_scale), _ptr(b_scale),
@@ -334,24 +333,38 @@ def launch_persistent_kernel(func, a, b, out, a_scale, b_scale,
     ]
     packed, _storage = _pack_args(*args)
 
-    _check_hip(
-        hip.hipModuleLaunchKernel(
-            func,
-            num_sms, 1, 1,   # grid
-            512, 1, 1,       # block (8 warps * 64 threads)
-            shared_mem,
-            None,            # default stream
-            packed,
-            None,
-        ),
-        "launching persistent kernel",
+    def launch():
+        _check_hip(
+            hip.hipModuleLaunchKernel(
+                func,
+                num_sms, 1, 1,
+                512, 1, 1,
+                shared_mem,
+                None,
+                packed,
+                None,
+            ),
+            "launching persistent kernel",
+        )
+
+    return launch, _storage
+
+
+def launch_persistent_kernel(func, a, b, out, a_scale, b_scale,
+                              group_offs, G, N, K,
+                              num_sms, shared_mem=65536):
+    """Launch persistent grouped GEMM .co with Triton's arg layout (Primus v26.2)."""
+    launch, _ = prepare_persistent_args(
+        func, a, b, out, a_scale, b_scale,
+        group_offs, G, N, K, num_sms, shared_mem,
     )
+    launch()
 
 
-def launch_variable_k_kernel(func, lhs, rhs, out, lhs_scale, rhs_scale,
-                               group_offs, G, OUT_M, OUT_N,
-                               num_sms, shared_mem=65536):
-    """Launch variable-K grouped GEMM .co with Triton's arg layout."""
+def prepare_variable_k_args(func, lhs, rhs, out, lhs_scale, rhs_scale,
+                             group_offs, G, OUT_M, OUT_N,
+                             num_sms, shared_mem=65536):
+    """Pre-pack args for variable-K kernel. Returns a launcher closure."""
     hip = _load_hip()
 
     stride_lhs_m = lhs.stride(0)
@@ -372,61 +385,159 @@ def launch_variable_k_kernel(func, lhs, rhs, out, lhs_scale, rhs_scale,
     ]
     packed, _storage = _pack_args(*args)
 
-    _check_hip(
-        hip.hipModuleLaunchKernel(
-            func,
-            num_sms, 1, 1,
-            512, 1, 1,
-            shared_mem,
-            None,
-            packed,
-            None,
-        ),
-        "launching variable-K kernel",
+    def launch():
+        _check_hip(
+            hip.hipModuleLaunchKernel(
+                func,
+                num_sms, 1, 1,
+                512, 1, 1,
+                shared_mem,
+                None,
+                packed,
+                None,
+            ),
+            "launching variable-K kernel",
+        )
+
+    return launch, _storage
+
+
+def launch_variable_k_kernel(func, lhs, rhs, out, lhs_scale, rhs_scale,
+                               group_offs, G, OUT_M, OUT_N,
+                               num_sms, shared_mem=65536):
+    """Launch variable-K grouped GEMM .co with Triton's arg layout."""
+    launch, _ = prepare_variable_k_args(
+        func, lhs, rhs, out, lhs_scale, rhs_scale,
+        group_offs, G, OUT_M, OUT_N, num_sms, shared_mem,
     )
+    launch()
 
 
 # ── Assemble .s -> .co ─────────────────────────────────────────────────────
 
-def assemble_if_needed(path):
-    """If path is .s, assemble to .co and return .co path. Otherwise return as-is."""
+def _find_text_section(data):
+    """Find .text section offset and size in an ELF binary."""
+    e_shoff = struct.unpack_from('<Q', data, 0x28)[0]
+    e_shentsize = struct.unpack_from('<H', data, 0x3A)[0]
+    e_shnum = struct.unpack_from('<H', data, 0x3C)[0]
+    e_shstrndx = struct.unpack_from('<H', data, 0x3E)[0]
+    strtab_off = e_shoff + e_shstrndx * e_shentsize
+    strtab_sh_offset = struct.unpack_from('<Q', data, strtab_off + 24)[0]
+    strtab_sh_size = struct.unpack_from('<Q', data, strtab_off + 32)[0]
+    strtab = data[strtab_sh_offset:strtab_sh_offset + strtab_sh_size]
+    for i in range(e_shnum):
+        sh_off = e_shoff + i * e_shentsize
+        sh_name_idx = struct.unpack_from('<I', data, sh_off)[0]
+        name_end = strtab.find(b'\x00', sh_name_idx)
+        sec_name = strtab[sh_name_idx:name_end].decode('ascii', errors='replace')
+        if sec_name == '.text':
+            return struct.unpack_from('<Q', data, sh_off + 24)[0], struct.unpack_from('<Q', data, sh_off + 32)[0]
+    raise ValueError("No .text section found")
+
+
+def assemble_if_needed(path, ref_co=None):
+    """If path is .s, assemble to .co and return .co path. Otherwise return as-is.
+
+    If ref_co is provided, the assembled machine code is patched into a copy
+    of ref_co (preserving its kernel descriptor and ELF metadata).
+    """
     if not path.endswith(".s"):
         return path
 
     co_path = path.replace(".s", ".co")
     print(f"Assembling {path} -> {co_path}")
 
-    # assemble .s -> .o
     obj_path = path.replace(".s", ".o")
-    result = subprocess.run(
-        ["llvm-mc", "-triple=amdgcn-amd-amdhsa", "-mcpu=gfx950",
-         "-filetype=obj", "-o", obj_path, path],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        # try with /opt/rocm path
-        result = subprocess.run(
-            ["/opt/rocm/llvm/bin/llvm-mc", "-triple=amdgcn-amd-amdhsa", "-mcpu=gfx950",
-             "-filetype=obj", "-o", obj_path, path],
-            capture_output=True, text=True,
-        )
+    llvm_paths = ["", "/opt/rocm/llvm/bin/", "/opt/rocm-7.2.0/lib/llvm/bin/"]
+    for prefix in llvm_paths:
+        try:
+            result = subprocess.run(
+                [f"{prefix}llvm-mc", "-triple=amdgcn-amd-amdhsa", "-mcpu=gfx950",
+                 "-filetype=obj", "-o", obj_path, path],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                break
+        except FileNotFoundError:
+            continue
     if result.returncode != 0:
         raise RuntimeError(f"Assembly failed:\n{result.stderr}")
 
-    # link .o -> .co
-    result = subprocess.run(
-        ["ld.lld", "-shared", "-o", co_path, obj_path],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        result = subprocess.run(
-            ["/opt/rocm/llvm/bin/ld.lld", "-shared", "-o", co_path, obj_path],
-            capture_output=True, text=True,
-        )
-    if result.returncode != 0:
-        raise RuntimeError(f"Linking failed:\n{result.stderr}")
+    if ref_co:
+        # Patch mode: extract .text from assembled .o, patch into ref .co
+        tmp_co = co_path + ".tmp"
+        for prefix in llvm_paths:
+            try:
+                result = subprocess.run(
+                    [f"{prefix}ld.lld", "-shared", "-o", tmp_co, obj_path],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    break
+            except FileNotFoundError:
+                continue
+        if result.returncode != 0:
+            raise RuntimeError(f"Linking failed:\n{result.stderr}")
 
-    print(f"  -> {co_path} ({os.path.getsize(co_path):,} bytes)")
+        with open(tmp_co, 'rb') as f:
+            new_elf = f.read()
+        new_text_off, new_text_size = _find_text_section(new_elf)
+        new_code = new_elf[new_text_off:new_text_off + new_text_size]
+
+        with open(ref_co, 'rb') as f:
+            ref_data = bytearray(f.read())
+        ref_text_off, ref_text_size = _find_text_section(bytes(ref_data))
+
+        if new_text_size > ref_text_size:
+            # Grow .text: update section header size field
+            e_shoff = struct.unpack_from('<Q', ref_data, 0x28)[0]
+            e_shentsize = struct.unpack_from('<H', ref_data, 0x3A)[0]
+            e_shnum = struct.unpack_from('<H', ref_data, 0x3C)[0]
+            e_shstrndx = struct.unpack_from('<H', ref_data, 0x3E)[0]
+            strtab_hdr = e_shoff + e_shstrndx * e_shentsize
+            strtab_off = struct.unpack_from('<Q', ref_data, strtab_hdr + 24)[0]
+            strtab_sz = struct.unpack_from('<Q', ref_data, strtab_hdr + 32)[0]
+            strtab_bytes = ref_data[strtab_off:strtab_off + strtab_sz]
+            for i in range(e_shnum):
+                sh_off = e_shoff + i * e_shentsize
+                ni = struct.unpack_from('<I', ref_data, sh_off)[0]
+                ne = strtab_bytes.find(b'\x00', ni)
+                sn = strtab_bytes[ni:ne].decode('ascii', errors='replace')
+                if sn == '.text':
+                    struct.pack_into('<Q', ref_data, sh_off + 32, new_text_size)
+                    break
+            # Splice in new code (may shift subsequent sections — acceptable for our use)
+            delta = new_text_size - ref_text_size
+            ref_data[ref_text_off:ref_text_off + ref_text_size] = new_code
+            # No need to relocate — sections after .text are at higher offsets already in the ELF
+            print(f"  WARNING: code grew by {delta}B ({ref_text_size}->{new_text_size})")
+        elif new_text_size < ref_text_size:
+            code = bytearray(new_code)
+            while len(code) < ref_text_size:
+                code += b'\x00\x00\x80\xBF'
+            ref_data[ref_text_off:ref_text_off + ref_text_size] = code
+        else:
+            ref_data[ref_text_off:ref_text_off + ref_text_size] = new_code
+
+        with open(co_path, 'wb') as f:
+            f.write(ref_data)
+        os.unlink(tmp_co)
+        print(f"  -> {co_path} (patched into {ref_co}, {os.path.getsize(co_path):,} bytes)")
+    else:
+        for prefix in llvm_paths:
+            try:
+                result = subprocess.run(
+                    [f"{prefix}ld.lld", "-shared", "-o", co_path, obj_path],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    break
+            except FileNotFoundError:
+                continue
+        if result.returncode != 0:
+            raise RuntimeError(f"Linking failed:\n{result.stderr}")
+        print(f"  -> {co_path} ({os.path.getsize(co_path):,} bytes)")
+
     return co_path
 
 
@@ -613,21 +724,22 @@ def benchmark(co_path, site_names, kernel_name=None, warmup=20, iters=100,
 
             if site["kernel_type"] == "persistent":
                 custom_out = torch.zeros(M, N, device="cuda", dtype=torch.bfloat16)
+                launch_fn, _keep = prepare_persistent_args(
+                    func, a, b, custom_out, a_scale, b_scale,
+                    group_offs, E, N, K, num_sms,
+                )
                 def run_custom():
                     custom_out.zero_()
-                    launch_persistent_kernel(
-                        func, a, b, custom_out, a_scale, b_scale,
-                        group_offs, E, N, K, num_sms,
-                    )
+                    launch_fn()
             else:
                 custom_out = torch.zeros(E, OUT_M, OUT_N, device="cuda", dtype=torch.bfloat16)
-
+                launch_fn, _keep = prepare_variable_k_args(
+                    func, lhs, rhs, custom_out, lhs_scale, rhs_scale,
+                    group_offs, E, OUT_M, OUT_N, num_sms,
+                )
                 def run_custom():
                     custom_out.zero_()
-                    launch_variable_k_kernel(
-                        func, lhs, rhs, custom_out, lhs_scale, rhs_scale,
-                        group_offs, E, OUT_M, OUT_N, num_sms,
-                    )
+                    launch_fn()
 
             for _ in range(warmup):
                 run_custom()
@@ -709,6 +821,8 @@ def main():
                         help="Path to .co (or .s to auto-assemble)")
     parser.add_argument("--kernel-name", type=str, default=None,
                         help="Kernel function name (auto-detected from ELF if omitted)")
+    parser.add_argument("--ref-co", type=str, default=None,
+                        help="Reference .co to patch into (preserves KD/metadata)")
     parser.add_argument("--site", type=str, default="all",
                         help="Call site(s): gate_up_fwd, down_fwd, etc. "
                              "Or: all, all_fwd, all_wgrad")
@@ -736,7 +850,7 @@ def main():
 
     # filter by kernel type if a kernel is provided
     if args.kernel and not args.triton_only:
-        co_path = assemble_if_needed(args.kernel)
+        co_path = assemble_if_needed(args.kernel, ref_co=args.ref_co)
         _, _, kname = load_kernel(co_path, args.kernel_name)
 
         if args.info:
